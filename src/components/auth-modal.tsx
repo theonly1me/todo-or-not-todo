@@ -39,7 +39,9 @@ export function AuthModal({ configuration, person, onClose, embedded = false }: 
   async function social(provider: "google" | "github") {
     setPending(true); setError("");
     try {
-      const result = await authClient.signIn.social({ provider, callbackURL: window.location.href });
+      const callback = new URL("/auth/callback", window.location.origin);
+      callback.searchParams.set("returnTo", window.location.pathname + window.location.search);
+      const result = await authClient.signIn.social({ provider, callbackURL: callback.href });
       if (result.error) setError(result.error.message ?? "Couldn't connect to this provider.");
     } catch { setError("Couldn't start sign-in. Please try again."); }
     finally { setPending(false); }
