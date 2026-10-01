@@ -1,70 +1,81 @@
-# Getting Started with Create React App
+# Todo or Not Todo
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A dark retro punk todo app built with Next.js, Better Auth, and Postgres. Sign-in is required. New accounts start with an empty workspace. Todos, shared links, and collaboration use a real database.
 
-## Available Scripts
+## Run locally
 
-In the project directory, you can run:
+Use Node.js 22 or newer.
 
-### `npm start`
+```sh
+npm install
+cp .env.example .env.local
+```
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in the browser.
+Fill in `DATABASE_URL`, `BETTER_AUTH_SECRET`, and `BETTER_AUTH_URL`. Generate the secret with `openssl rand -base64 32`. The database can be local Postgres or a free Neon database.
 
-The page will reload if you make edits.\
-You will also see any lint errors in the console.
+```sh
+npm run db:migrate
+npm run dev
+```
 
-### `npm test`
+Open http://localhost:3000. Sign up with an email and password to create a personal workspace. Create another workspace and copy its invitation link to collaborate with another account.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Authentication
 
-### `npm run build`
+Better Auth is free and open source. It hashes passwords and stores sessions in Postgres. No passwords or session tokens are stored in browser local storage.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+The deployed side project uses Neon Managed Better Auth. Set `NEON_AUTH_BASE_URL`, a generated `NEON_AUTH_COOKIE_SECRET`, and `NEXT_PUBLIC_MANAGED_AUTH=true`. Neon provides shared Google OAuth keys and email-code delivery for development and side-project testing. Register your exact app origin in Neon Auth settings. For a public production app, configure your own OAuth keys and SMTP provider.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+Without managed auth variables, the app uses self-hosted Better Auth. Email/password sign-in needs the three variables above. Optional providers become available when their credentials are configured.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+| Feature | Environment variables | Setup |
+| --- | --- | --- |
+| Google sign-in | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Add `/api/auth/callback/google` to your site's origin as an authorized redirect URI. |
+| GitHub sign-in | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Create an OAuth app with your site's `/api/auth/callback/github` URL. |
+| Emailed sign-in codes | `RESEND_API_KEY`, `EMAIL_FROM` | Use a Resend API key and a verified sender address. Codes expire after five minutes. |
 
-### `npm run eject`
+For example, a Google callback on production is `https://todo-or-not-todo-nine.vercel.app/api/auth/callback/google`. Register local callbacks separately if you want OAuth during development. Account sign-in is real, including during local development.
 
-**Note: this is a one-way operation. Once you `eject`, you can’t go back!**
+## Deploy on Vercel
 
-If you aren’t satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+1. Import `theonly1me/todo-or-not-todo`. Select Next.js and the `main` production branch.
+2. Connect a free Neon database through Vercel Marketplace.
+3. Add generated `BETTER_AUTH_SECRET` and `NEON_AUTH_COOKIE_SECRET` values. Set `BETTER_AUTH_URL` to the production origin and `NEXT_PUBLIC_MANAGED_AUTH=true`.
+4. Register the production origin in Neon Auth settings. Shared Google and email providers are available for this side project.
+5. Run the migrations once against the production database before using accounts.
+6. Deploy. Future pushes to `main` deploy automatically through the Git integration.
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you’re on your own.
+To run migrations with production credentials without overwriting the local development environment:
 
-You don’t have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn’t feel obligated to use this feature. However we understand that this tool wouldn’t be useful if you couldn’t customize it when you are ready for it.
+```sh
+npx vercel env pull .env.production.local --environment=production
+npx tsx --env-file=.env.production.local scripts/migrate.ts
+```
 
-## Learn More
+Use a separate database and auth base URL for Vercel preview deployments. Do not set the production base URL on a preview domain.
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## Features
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+- Add, rename, update, delete, and complete todos.
+- Attach multiple editable notes to a todo.
+- Create and rename groups. Deleting a group keeps its todos and moves them to Unsorted thoughts.
+- Assign todos to workspace members and move todos between groups.
+- Share a read-only todo link. The page reads the latest saved todo and notes; deleting the todo makes the link return 404.
+- Create workspaces and invite signed-in members through unguessable invitation links. Anyone with an invitation can join and edit that workspace.
+- Start a race with at least two members who have unfinished assigned todos. The race snapshots each participant's todo list. Finishing all selected todos records a server timestamp and ranks finishers by time. End the race before deleting or reassigning a racing todo.
+- Shared workspaces poll for changes every five seconds while the tab is visible. Mutations lock the workspace row so concurrent changes to different todos are preserved.
 
-### Code Splitting
+Signed-out users see the authentication page. No sample tasks or browser-only editable boards are provided. Creating and editing todos or workspaces requires an authenticated session.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+## Checks
 
-### Analyzing the Bundle Size
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+Dependencies have specific roles. The Neon auth adapter enables its managed email and OAuth service, Better Auth handles local authentication, `pg` handles Postgres, Zod validates stored data and mutations, and Lucide supplies interface icons.
 
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+For the HTTP integration checks, build and start the app on port 3001 against a disposable local database, then run `npm run test:integration`. This checks real accounts, concurrent writes, member access, live share links, and race completion.
