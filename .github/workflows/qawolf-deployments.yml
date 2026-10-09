@@ -1,0 +1,82 @@
+name: Report deployments to QA Wolf
+
+on:
+  deployment_status:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: read
+
+jobs:
+  report:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.deployment_status.state == 'success' && github.event.deployment.creator.login == 'vercel[bot]' && (github.event.deployment.environment == 'Preview' || github.event.deployment.environment == 'Production'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const production = { name: "production", url: "https://todo-or-not-todo-nine.vercel.app" };
+            const isPullRequestEvent = context.eventName === "pull_request";
+            const isProductionDeployment = !isPullRequestEvent && context.payload.deployment.environment === "Production";
+            const sha = isPullRequestEvent ? context.payload.pull_request.head.sha : context.payload.deployment.sha;
+
+            async function report(options) {
+              const { data: created } = await github.rest.repos.createDeployment({
+                ...context.repo,
+                ref: sha,
+                environment: options.name,
+                transient_environment: options.transient,
+                auto_merge: false,
+                required_contexts: [],
+              });
+              await github.rest.repos.createDeploymentStatus({
+                ...context.repo,
+                deployment_id: created.id,
+                state: "success",
+                environment_url: options.url,
+              });
+              core.info(`Reported ${sha} to QA Wolf as ${options.name}`);
+            }
+
+            async function findPreviewUrl() {
+              if (!isPullRequestEvent) return context.payload.deployment_status.environment_url;
+              const { data: deployments } = await github.rest.repos.listDeployments({ ...context.repo, sha, environment: "Preview" });
+              for (const deployment of deployments.filter((candidate) => candidate.creator?.login === "vercel[bot]")) {
+                const { data: statuses } = await github.rest.repos.listDeploymentStatuses({ ...context.repo, deployment_id: deployment.id, per_page: 1 });
+                const [latest] = statuses;
+                if (latest?.state === "success") return latest.environment_url;
+              }
+              return undefined;
+            }
+
+            async function findOpenPullRequest() {
+              if (isPullRequestEvent) return context.payload.pull_request;
+              const { data: pullRequests } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                ...context.repo,
+                commit_sha: sha,
+              });
+              return pullRequests.find((pullRequest) => pullRequest.state === "open" && pullRequest.head.sha === sha);
+            }
+
+            if (isProductionDeployment) {
+              await report({ ...production, transient: false });
+              return;
+            }
+
+            const previewUrl = await findPreviewUrl();
+            if (!previewUrl) {
+              core.info(`No finished preview for ${sha} yet, the deployment event reports it`);
+              return;
+            }
+
+            const pullRequest = await findOpenPullRequest();
+            if (pullRequest) {
+              await report({ name: `preview/pr-${pullRequest.number}`, url: previewUrl, transient: true });
+            } else {
+              core.info(`No open pull request for ${sha}, nothing reported`);
+            }
