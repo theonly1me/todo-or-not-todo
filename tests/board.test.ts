@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyMutation } from "../src/lib/model";
+import { applyMutation } from "../src/lib/mutations";
 import { fixtureBoard } from "./fixtures";
 
 test("deleting a group keeps its todos and linked notes", () => {
