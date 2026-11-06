@@ -41,7 +41,7 @@ export function applyMutation(options: { board: Board; mutation: Mutation; now: 
     case "add-todo": result.todos.push(mutation.todo); break;
     case "update-todo":
       result.todos = result.todos.map(todo => todo.id === mutation.id ? {
-        ...todo, ...mutation.changes,
+        ...mutation.changes, ...todo,
         completedAt: mutation.changes.completed === undefined ? todo.completedAt : mutation.changes.completed ? now : null,
       } : todo); break;
     case "delete-todo": result.todos = result.todos.filter(todo => todo.id !== mutation.id); break;
