@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { database } from "@/lib/database";
+import { withoutStaleGroupReferences } from "@/lib/board-integrity";
 import { applyMutation, boardSchema, mutationSchema, type Mutation, type Workspace } from "@/lib/model";
 import { getWorkspace, requirePerson } from "@/lib/workspaces";
 
@@ -47,7 +48,7 @@ export async function changeWorkspace(options: { id: string; mutation: Mutation 
         if (racingEntry && racingEntry.personId !== person.id) throw new Error("Only the person assigned to a racing todo can complete it.");
       }
       if (mutation.type === "start-race" && new Set(board.todos.filter(todo => !todo.completed && todo.assigneeId).map(todo => todo.assigneeId)).size < 2) throw new Error("Assign unfinished todos to at least two people to start a race.");
-      const updated = applyMutation({ board, mutation, now: new Date().toISOString(), id: randomUUID() });
+      const updated = applyMutation({ board: withoutStaleGroupReferences({ board, mutation }), mutation, now: new Date().toISOString(), id: randomUUID() });
       await client.query("UPDATE workspaces SET board = $1 WHERE id = $2", [JSON.stringify(updated), options.id]);
       await client.query("COMMIT");
       return updated;
