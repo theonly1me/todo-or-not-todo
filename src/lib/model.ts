@@ -33,5 +33,37 @@ export type Board = z.infer<typeof boardSchema>;
 export type Mutation = z.infer<typeof mutationSchema>;
 export type Workspace = { id: string; name: string; inviteToken: string; board: Board; members: Person[] };
 export type Configuration = { ready: boolean; google: boolean; github: boolean; email: boolean };
-export type MutationOf<Type extends Mutation["type"]> = Extract<Mutation, { type: Type }>;
-export type TodoChanges = MutationOf<"update-todo">["changes"];
+
+export function applyMutation(options: { board: Board; mutation: Mutation; now: string; id: string }): Board {
+  const { board, mutation, now, id } = options;
+  let result: Board = structuredClone(board);
+  switch (mutation.type) {
+    case "add-todo": result.todos.push(mutation.todo); break;
+    case "update-todo":
+      result.todos = result.todos.map(todo => todo.id === mutation.id ? {
+        ...mutation.changes, ...todo,
+        completedAt: mutation.changes.completed === undefined ? todo.completedAt : mutation.changes.completed ? now : null,
+      } : todo); break;
+    case "delete-todo": result.todos = result.todos.filter(todo => todo.id !== mutation.id); break;
+    case "add-group": result.groups.push(mutation.group); break;
+    case "rename-group": result.groups = result.groups.map(group => group.id === mutation.id ? { ...group, name: mutation.name } : group); break;
+    case "delete-group":
+      result.groups = result.groups.filter(group => group.id !== mutation.id);
+      result.todos = result.todos.map(todo => todo.groupId === mutation.id ? { ...todo, groupId: null } : todo); break;
+    case "start-race": {
+      const people = [...new Set(result.todos.filter(todo => !todo.completed && todo.assigneeId).map(todo => todo.assigneeId))];
+      result.race = { id, name: mutation.name, startedAt: now, entries: people.flatMap(personId => personId ? [{
+        personId, todoIds: result.todos.filter(todo => !todo.completed && todo.assigneeId === personId).map(todo => todo.id), finishedAt: null,
+      }] : []) }; break;
+    }
+    case "end-race": result.race = null; break;
+  }
+  if (result.race) {
+    result.race.entries = result.race.entries.map(entry => ({ ...entry, finishedAt:
+      entry.todoIds.every(todoId => result.todos.some(todo => todo.id === todoId && todo.completed))
+        ? entry.finishedAt ?? now : null,
+    }));
+  }
+  result = boardSchema.parse(result);
+  return result;
+}

@@ -3,8 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { database } from "@/lib/database";
-import { boardSchema, mutationSchema, type Mutation, type Workspace } from "@/lib/model";
-import { applyMutation } from "@/lib/mutations";
+import { applyMutation, boardSchema, mutationSchema, type Mutation, type Workspace } from "@/lib/model";
 import { getWorkspace, requirePerson } from "@/lib/workspaces";
 
 async function attempt<Result>(operation: () => Promise<Result>): Promise<{ data: Result; error?: never } | { error: string; data?: never }> {
