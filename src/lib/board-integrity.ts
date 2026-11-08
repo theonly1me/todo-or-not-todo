@@ -8,5 +8,5 @@ function liveGroupIds(options: { board: Board; mutation: Mutation }): Set<string
 
 export function withoutStaleGroupReferences(options: { board: Board; mutation: Mutation }): Board {
   const groupIds = liveGroupIds(options);
-  return { ...options.board, todos: options.board.todos.filter(todo => todo.groupId === null || groupIds.has(todo.groupId)) };
+  return { ...options.board, todos: options.board.todos.map(todo => (todo.groupId === null || groupIds.has(todo.groupId) ? todo : { ...todo, groupId: null })) };
 }
