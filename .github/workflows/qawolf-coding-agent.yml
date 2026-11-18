@@ -1,0 +1,106 @@
+# QA Wolf coding agent
+#
+# When a QA Wolf loop uses /coding-agent, QA Wolf starts this workflow with
+# one bug to fix. Your coding agent fixes it here, with your keys and your
+# checks, and QA Wolf opens a draft pull request and runs the bug's flows on
+# its preview to confirm the fix. See docs.qawolf.com/coding-agent.
+#
+# Setup: commit this file to your default branch, then add one of these
+# repository secrets. The first one that's set picks the agent:
+#   Claude Code  ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
+#   Codex        OPENAI_API_KEY
+#   Cursor       CURSOR_API_KEY
+#
+# Each key goes only to its own agent's step. QA Wolf's step never gets a key
+# or token of yours.
+# Before you commit this file, read "What to protect" in the action's README.
+
+name: QA Wolf coding agent
+run-name: "QA Wolf: fix Bug #${{ inputs.bug }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fix:
+        description: The fix QA Wolf asked for. QA Wolf fills this in.
+        required: true
+      bug:
+        description: The bug's number, for the run's name.
+        required: false
+
+permissions:
+  contents: write # push the fix's branch
+  id-token: write # prove to QA Wolf that this run is in this repository
+
+concurrency:
+  group: qawolf-coding-agent-${{ inputs.fix }}
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The agent: the first of your keys that's set. This only checks whether
+      # each one is set. To use your own CLI, put command here and fill in the
+      # "Your command" step below.
+      AGENT: ${{ (secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '') && 'claude-code' || secrets.OPENAI_API_KEY != '' && 'codex' || secrets.CURSOR_API_KEY != '' && 'cursor' || 'none' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false # keep the GitHub token off the disk
+
+      # Optional: set up what your checks need, as your CI does. The agent
+      # can install dependencies itself, but this is faster.
+      # - uses: actions/setup-node@v5
+      #   with:
+      #     node-version-file: .nvmrc
+      #     cache: npm
+      # - run: npm ci
+
+      # QA Wolf: gets the bug and the prompt before your agent runs, and
+      # reports what happened when the job ends. It gets no keys.
+      - id: qawolf
+        uses: qawolf/coding-agent-action@v1
+        with:
+          fix: ${{ inputs.fix }}
+          agent: ${{ env.AGENT }}
+          qawolf-base-url: https://app.staging.qawolf.app
+
+      - name: Claude Code
+        if: steps.qawolf.outputs.agent == 'claude-code'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: npx -y @anthropic-ai/claude-code -p --permission-mode acceptEdits --allowedTools Bash < "$QAWOLF_PROMPT_FILE"
+
+      - name: Codex
+        if: steps.qawolf.outputs.agent == 'codex'
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx -y @openai/codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true -c "sandbox_workspace_write.writable_roots=[\"$RUNNER_TEMP\"]" - < "$QAWOLF_PROMPT_FILE"
+
+      - name: Cursor
+        if: steps.qawolf.outputs.agent == 'cursor'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          curl -fsS https://cursor.com/install | bash
+          ~/.local/bin/agent -p --force "$(cat "$QAWOLF_PROMPT_FILE")"
+
+      # - name: Your command
+      #   if: steps.qawolf.outputs.agent == 'command'
+      #   env:
+      #     YOUR_AGENT_KEY: ${{ secrets.YOUR_AGENT_KEY }}
+      #   run: ./scripts/fix-bug.sh # reads $QAWOLF_PROMPT_FILE
+
+      # Pushes the fix's branch with this run's own GitHub token, when the
+      # agent fixed the bug. QA Wolf opens the draft pull request from it.
+      - name: Push the fix
+        if: steps.qawolf.outputs.agent != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ "$(jq -r .status "$QAWOLF_RESULT_FILE")" = fixed ] || exit 0
+          git add -A
+          git commit -m "$(jq -r 'if (.title // "") == "" then "Fix QA Wolf bug" else .title end' "$QAWOLF_RESULT_FILE")" || true
+          git push "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY" "HEAD:refs/heads/$QAWOLF_BRANCH"
