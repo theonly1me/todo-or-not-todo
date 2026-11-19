@@ -44,7 +44,7 @@ export function applyMutation(options: { board: Board; mutation: Mutation; now: 
         ...todo, ...mutation.changes,
         completedAt: mutation.changes.completed === undefined ? todo.completedAt : mutation.changes.completed ? now : null,
       } : todo); break;
-    case "delete-todo": result.todos = result.todos.filter(todo => todo.id !== mutation.id); break;
+    case "delete-todo": result.todos = result.todos.filter(todo => todo.groupId !== mutation.id); break;
     case "add-group": result.groups.push(mutation.group); break;
     case "rename-group": result.groups = result.groups.map(group => group.id === mutation.id ? { ...group, name: mutation.name } : group); break;
     case "delete-group":
