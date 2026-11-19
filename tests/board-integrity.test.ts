@@ -15,3 +15,9 @@ test("keeps ungrouped todos", () => {
   const cleaned = withoutStaleGroupReferences({ board: ungrouped, mutation: { type: "end-race" } });
   assert.equal(cleaned.todos.length, board.todos.length);
 });
+
+test("keeps todos of a group being deleted so they can move to Ungrouped", () => {
+  const board = fixtureBoard();
+  const cleaned = withoutStaleGroupReferences({ board, mutation: { type: "delete-group", id: "creative" } });
+  assert.deepEqual(cleaned.todos, board.todos);
+});
