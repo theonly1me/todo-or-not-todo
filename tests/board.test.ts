@@ -13,6 +13,13 @@ test("deleting a group keeps its todos and linked notes", () => {
   assert.equal(board.groups.length, 3);
 });
 
+test("deleting a todo removes only that todo", () => {
+  const board = fixtureBoard();
+  const updated = applyMutation({ board, mutation: { type: "delete-todo", id: "poster" }, now: "2026-10-01T10:00:00Z", id: "change" });
+  assert.equal(updated.todos.length, board.todos.length - 1);
+  assert.equal(updated.todos.some(todo => todo.id === "poster"), false);
+});
+
 test("a racer only finishes when every todo selected at the start is complete", () => {
   const board = fixtureBoard();
   const started = applyMutation({ board, mutation: { type: "start-race", name: "First to finish" }, now: "2026-10-01T10:00:00Z", id: "race" });
