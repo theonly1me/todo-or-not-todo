@@ -2,7 +2,7 @@
 #
 # When a QA Wolf loop uses /coding-agent, QA Wolf starts this workflow with
 # one bug to fix. Your coding agent fixes it here, with your keys and your
-# checks, and QA Wolf opens a draft pull request and runs the bug's flows on
+# checks, and QA Wolf opens a pull request and runs the bug's flows on
 # its preview to confirm the fix. See docs.qawolf.com/coding-agent.
 #
 # Setup: commit this file to your default branch, then add one of these
@@ -11,12 +11,21 @@
 #   Codex        OPENAI_API_KEY
 #   Cursor       CURSOR_API_KEY
 #
+# Claude Code with no stored key: set up Workload Identity Federation in the
+# Claude Console, then add these repository variables (not secrets):
+#   ANTHROPIC_FEDERATION_RULE_ID  fdrl_..., turns federation on
+#   ANTHROPIC_ORGANIZATION_ID     your organization's ID
+#   ANTHROPIC_SERVICE_ACCOUNT_ID  svac_..., optional
+#   ANTHROPIC_WORKSPACE_ID        wrkspc_..., when the rule covers several workspaces
+# With federation, the Claude Code step gets no ANTHROPIC_API_KEY and no
+# CLAUDE_CODE_OAUTH_TOKEN, because Claude Code uses a stored key first.
+#
 # Each key goes only to its own agent's step. QA Wolf's step never gets a key
 # or token of yours.
 # Before you commit this file, read "What to protect" in the action's README.
 
 name: QA Wolf coding agent
-run-name: "QA Wolf: fix Bug #${{ inputs.bug }}"
+run-name: "QA Wolf: ${{ inputs.pull_request && format('address a review of #{0} for', inputs.pull_request) || 'fix' }} Bug #${{ inputs.bug }}"
 
 on:
   workflow_dispatch:
@@ -27,10 +36,14 @@ on:
       bug:
         description: The bug's number, for the run's name.
         required: false
+      pull_request:
+        description: The fix's pull request, when a reviewer submitted a review on it. QA Wolf fills this in.
+        required: false
 
 permissions:
   contents: write # push the fix's branch
   id-token: write # prove to QA Wolf that this run is in this repository
+  pull-requests: read # read the reviews of the fix's pull request
 
 concurrency:
   group: qawolf-coding-agent-${{ inputs.fix }}
@@ -43,7 +56,7 @@ jobs:
       # The agent: the first of your keys that's set. This only checks whether
       # each one is set. To use your own CLI, put command here and fill in the
       # "Your command" step below.
-      AGENT: ${{ (secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '') && 'claude-code' || secrets.OPENAI_API_KEY != '' && 'codex' || secrets.CURSOR_API_KEY != '' && 'cursor' || 'none' }}
+      AGENT: ${{ (vars.ANTHROPIC_FEDERATION_RULE_ID != '' || secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '') && 'claude-code' || (vars.OPENAI_IDENTITY_PROVIDER_ID != '' || secrets.OPENAI_API_KEY != '') && 'codex' || secrets.CURSOR_API_KEY != '' && 'cursor' || 'none' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -66,24 +79,208 @@ jobs:
           agent: ${{ env.AGENT }}
           qawolf-base-url: https://app.staging.qawolf.app
 
+      # When a reviewer who can push to this repository submits a review on
+      # the fix's pull request, QA Wolf starts this workflow again. This step
+      # checks out the pull request's branch with enough history for a diff
+      # against its base ($QAWOLF_BASE_REF), and saves its reviews in a file
+      # for the agent, with this run's own GitHub token. It keeps only what
+      # people who can push here wrote. No agent step gets a GitHub token.
+      - name: Continue the pull request
+        if: steps.qawolf.outputs.pull-request != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ steps.qawolf.outputs.pull-request }}
+        run: |
+          pull_request="repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST"
+          remote="https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY"
+          base_branch="$(gh api "$pull_request" --jq .base.ref)"
+          base_ref=refs/remotes/qawolf/base
+          fetch_history() { git fetch --no-tags "$@" "$remote" "+refs/heads/$QAWOLF_BRANCH:refs/remotes/qawolf/fix" "+refs/heads/$base_branch:$base_ref"; }
+          for depth in 50 200 800 3200; do
+            fetch_history "--depth=$depth"
+            if git merge-base refs/remotes/qawolf/fix "$base_ref" > /dev/null; then break; fi
+          done
+          git merge-base refs/remotes/qawolf/fix "$base_ref" > /dev/null || fetch_history --unshallow || true
+          rm -f "$(git rev-parse --git-path FETCH_HEAD)"
+          if ! git merge-base refs/remotes/qawolf/fix "$base_ref" > /dev/null; then
+            echo "::error::$QAWOLF_BRANCH and $base_branch share no commit, so the agent can't read the pull request's diff."
+            exit 1
+          fi
+          git switch -C "$QAWOLF_BRANCH" refs/remotes/qawolf/fix
+          echo "QAWOLF_BASE_REF=$base_ref" >> "$GITHUB_ENV"
+          gh api --paginate --slurp "$pull_request/reviews" | jq 'add' > "$RUNNER_TEMP/qawolf-reviews.json"
+          gh api --paginate --slurp "$pull_request/comments" | jq 'add' > "$RUNNER_TEMP/qawolf-review-comments.json"
+          writers=""
+          for login in $(jq -rs 'add | map(select(.user.type == "User") | .user.login) | unique | .[]' "$RUNNER_TEMP/qawolf-reviews.json" "$RUNNER_TEMP/qawolf-review-comments.json"); do
+            if ! permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$login/permission" --jq .permission 2> "$RUNNER_TEMP/qawolf-permission-error")"; then
+              if ! grep -q "HTTP 404" "$RUNNER_TEMP/qawolf-permission-error"; then
+                echo "::error::GitHub didn't say whether $login can push to this repository, so the reviews are not saved: $(cat "$RUNNER_TEMP/qawolf-permission-error")"
+                exit 1
+              fi
+              permission=none
+            fi
+            case "$permission" in admin | write) writers="$writers $login" ;; esac
+          done
+          jq -n --arg writers "$writers" \
+            --slurpfile reviews "$RUNNER_TEMP/qawolf-reviews.json" \
+            --slurpfile comments "$RUNNER_TEMP/qawolf-review-comments.json" '
+            ($writers | split(" ")) as $canPush
+            | def fromWriters: map(select(.user.login as $login | $canPush | index($login)));
+            {
+              reviews: ($reviews[0] | fromWriters | map({id, author: .user.login, state, body, submittedAt: .submitted_at})),
+              comments: ($comments[0] | fromWriters | map({id, reviewId: .pull_request_review_id, inReplyToId: .in_reply_to_id, author: .user.login, path, line, body, diffHunk: .diff_hunk}))
+            }' > "$QAWOLF_REVIEW_FILE"
+          rm -f "$RUNNER_TEMP/qawolf-reviews.json" "$RUNNER_TEMP/qawolf-review-comments.json"
+
       - name: Claude Code
         if: steps.qawolf.outputs.agent == 'claude-code'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: npx -y @anthropic-ai/claude-code -p --permission-mode acceptEdits --allowedTools Bash < "$QAWOLF_PROMPT_FILE"
+          # Federation is on when the variable ANTHROPIC_FEDERATION_RULE_ID is
+          # set. The key and the token then stay out of this step.
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          ANTHROPIC_API_KEY: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID == '' && secrets.ANTHROPIC_API_KEY || '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID == '' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          STORED_KEY_IS_SET: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          set -o pipefail
+          for name in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_ORGANIZATION_ID ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
+            [ -n "${!name}" ] || unset "$name"
+          done
+
+          if [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ]; then
+            if [ -z "$ANTHROPIC_ORGANIZATION_ID" ]; then
+              echo "::error::The variable ANTHROPIC_FEDERATION_RULE_ID is set, so Claude Code signs in with Anthropic federation, but the variable ANTHROPIC_ORGANIZATION_ID is not set. Add it, or remove ANTHROPIC_FEDERATION_RULE_ID to use a stored key."
+              exit 1
+            fi
+            if [ "$STORED_KEY_IS_SET" = true ]; then
+              echo "::warning::Claude Code signs in with Anthropic federation, because the variable ANTHROPIC_FEDERATION_RULE_ID is set. The secrets ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN are not used: delete them when federation works."
+            fi
+            unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+
+            # GitHub's identity token lives about 5 minutes and Anthropic takes
+            # each one once. So this writes a new one every minute while the
+            # agent runs, and Claude Code reads the file when it signs in again.
+            identity_dir="$RUNNER_TEMP/qawolf-anthropic-identity"
+            export ANTHROPIC_IDENTITY_TOKEN_FILE="$identity_dir/token"
+            mkdir -p -m 700 "$identity_dir"
+            write_identity_token() {
+              local token
+              token=$(curl -fsS --retry 3 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fapi.anthropic.com" | jq -er .value) || return 1
+              echo "::add-mask::$token"
+              (umask 077 && printf %s "$token" > "$ANTHROPIC_IDENTITY_TOKEN_FILE.next") && mv "$ANTHROPIC_IDENTITY_TOKEN_FILE.next" "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+            }
+            if ! write_identity_token; then
+              echo "::error::GitHub gave this job no identity token for Anthropic. Keep 'id-token: write' in this workflow's permissions."
+              exit 1
+            fi
+            echo "GitHub's subject for this run: $(jq -rR 'split(".")[1] | gsub("-"; "+") | gsub("_"; "/") | @base64d | fromjson | .sub' "$ANTHROPIC_IDENTITY_TOKEN_FILE" 2>/dev/null || echo unknown). The federation rule's subject must match it."
+            (
+              trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+              while true; do
+                sleep 60 &
+                sleeper=$!
+                wait "$sleeper"
+                write_identity_token || echo "::warning::Could not get a new GitHub identity token for Anthropic. Claude Code stops if this continues."
+              done
+            ) &
+            refresher=$!
+            trap 'kill "$refresher" 2>/dev/null || true; rm -rf "$identity_dir"' EXIT
+            echo "Claude Code signs in with Anthropic federation (rule $ANTHROPIC_FEDERATION_RULE_ID)."
+          else
+            unset ANTHROPIC_FEDERATION_RULE_ID
+          fi
+
+          # The agent's environment does not get this run's token for asking
+          # GitHub for identity tokens. See "What to protect" in the README.
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          npx -y @anthropic-ai/claude-code -p --permission-mode acceptEdits --allowedTools Bash < "$QAWOLF_PROMPT_FILE"
 
       - name: Codex
         if: steps.qawolf.outputs.agent == 'codex'
         env:
-          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: npx -y @openai/codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true -c "sandbox_workspace_write.writable_roots=[\"$RUNNER_TEMP\"]" - < "$QAWOLF_PROMPT_FILE"
+          OPENAI_IDENTITY_PROVIDER_ID: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          OPENAI_SERVICE_ACCOUNT_ID: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          OPENAI_WIF_AUDIENCE: ${{ vars.OPENAI_WIF_AUDIENCE }}
+          CODEX_API_KEY: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID == '' && secrets.OPENAI_API_KEY || '' }}
+          STORED_KEY_IS_SET: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: |
+          set -o pipefail
+          [ -n "$CODEX_API_KEY" ] || unset CODEX_API_KEY
+          federation_arguments=()
+
+          if [ -n "$OPENAI_IDENTITY_PROVIDER_ID" ]; then
+            for name in OPENAI_SERVICE_ACCOUNT_ID OPENAI_WIF_AUDIENCE; do
+              if [ -z "${!name}" ]; then
+                echo "::error::The variable OPENAI_IDENTITY_PROVIDER_ID is set, so Codex signs in with OpenAI federation, but the variable $name is not set. Add it, or remove OPENAI_IDENTITY_PROVIDER_ID to use a stored key."
+                exit 1
+              fi
+            done
+            if [ "$STORED_KEY_IS_SET" = true ]; then
+              echo "::warning::Codex signs in with OpenAI federation, because the variable OPENAI_IDENTITY_PROVIDER_ID is set. The secret OPENAI_API_KEY is not used: delete it when federation works."
+            fi
+            unset CODEX_API_KEY
+
+            access_dir="$RUNNER_TEMP/qawolf-openai-access"
+            access_token_file="$access_dir/token"
+            mkdir -p -m 700 "$access_dir"
+            write_access_token() {
+              local level=$1 identity_token exchange access_token
+              if ! identity_token=$(curl -fsS --retry 3 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$(jq -rn --arg audience "$OPENAI_WIF_AUDIENCE" '$audience | @uri')" | jq -er .value); then
+                echo "::$level::GitHub gave this job no identity token for OpenAI. Keep 'id-token: write' in this workflow's permissions."
+                return 1
+              fi
+              echo "::add-mask::$identity_token"
+              if ! exchange=$(IDENTITY_TOKEN="$identity_token" jq -n '{grant_type: "urn:ietf:params:oauth:grant-type:token-exchange", subject_token_type: "urn:ietf:params:oauth:token-type:jwt", subject_token: env.IDENTITY_TOKEN, identity_provider_id: env.OPENAI_IDENTITY_PROVIDER_ID, service_account_id: env.OPENAI_SERVICE_ACCOUNT_ID}' | curl -sS --retry 3 -H "Content-Type: application/json" -d @- https://auth.openai.com/oauth/token); then
+                echo "::$level::OpenAI's token endpoint gave no answer."
+                return 1
+              fi
+              if ! access_token=$(jq -er '.access_token // empty' <<< "$exchange" 2>/dev/null); then
+                echo "::$level::OpenAI did not accept GitHub's identity token. OpenAI's answer: $exchange"
+                return 1
+              fi
+              echo "::add-mask::$access_token"
+              (umask 077 && printf %s "$access_token" > "$access_token_file.next") && mv "$access_token_file.next" "$access_token_file"
+            }
+            if ! write_access_token error; then
+              rm -rf "$access_dir"
+              exit 1
+            fi
+            (
+              trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+              while true; do
+                sleep 60 &
+                sleeper=$!
+                wait "$sleeper"
+                write_access_token warning || echo "::warning::Codex stops when its OpenAI access token expires, if this continues."
+              done
+            ) &
+            refresher=$!
+            trap 'kill "$refresher" 2>/dev/null || true; rm -rf "$access_dir"' EXIT
+            federation_arguments=(
+              -c model_provider=openai_federation
+              -c 'model_providers.openai_federation.name="OpenAI with federation"'
+              -c 'model_providers.openai_federation.base_url="https://api.openai.com/v1"'
+              -c 'model_providers.openai_federation.wire_api="responses"'
+              -c 'model_providers.openai_federation.auth.command="cat"'
+              -c "model_providers.openai_federation.auth.args=[\"$access_token_file\"]"
+              -c model_providers.openai_federation.auth.refresh_interval_ms=60000
+            )
+            echo "Codex signs in with OpenAI federation (provider $OPENAI_IDENTITY_PROVIDER_ID)."
+          fi
+
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          npx -y @openai/codex exec "${federation_arguments[@]}" --sandbox workspace-write -c sandbox_workspace_write.network_access=true -c "sandbox_workspace_write.writable_roots=[\"$RUNNER_TEMP\"]" - < "$QAWOLF_PROMPT_FILE"
 
       - name: Cursor
         if: steps.qawolf.outputs.agent == 'cursor'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
         run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
           curl -fsS https://cursor.com/install | bash
           ~/.local/bin/agent -p --force "$(cat "$QAWOLF_PROMPT_FILE")"
 
@@ -91,10 +288,12 @@ jobs:
       #   if: steps.qawolf.outputs.agent == 'command'
       #   env:
       #     YOUR_AGENT_KEY: ${{ secrets.YOUR_AGENT_KEY }}
-      #   run: ./scripts/fix-bug.sh # reads $QAWOLF_PROMPT_FILE
+      #   run: |
+      #     unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+      #     ./scripts/fix-bug.sh # reads $QAWOLF_PROMPT_FILE
 
       # Pushes the fix's branch with this run's own GitHub token, when the
-      # agent fixed the bug. QA Wolf opens the draft pull request from it.
+      # agent fixed the bug. QA Wolf opens the pull request from it.
       - name: Push the fix
         if: steps.qawolf.outputs.agent != ''
         env:
